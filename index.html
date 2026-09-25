@@ -1,0 +1,78 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover,user-scalable=no" />
+<meta name="theme-color" content="#111827" />
+<link rel="manifest" href="manifest.json" />
+<title>Hydrant GPS</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" crossorigin=""/>
+<style>
+*{box-sizing:border-box}html,body,#map{height:100%;margin:0}body{font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;overflow:hidden;background:#111827}.top{position:fixed;z-index:1000;top:12px;left:12px;right:12px;display:flex;gap:8px;align-items:center}.brand{background:#111827eF;color:#fff;border-radius:14px;padding:10px 14px;font-weight:800;box-shadow:0 3px 14px #0004}.search{flex:1;min-width:0;background:#fff;border:0;border-radius:14px;padding:11px 13px;font-size:15px;box-shadow:0 3px 14px #0003}.fab{position:fixed;z-index:1000;right:16px;bottom:100px;width:54px;height:54px;border:0;border-radius:50%;background:#fff;box-shadow:0 4px 18px #0004;font-size:23px}.panel{position:fixed;z-index:1000;left:12px;right:12px;bottom:12px;background:#fffffff2;border-radius:18px;padding:13px 15px;box-shadow:0 5px 24px #0004;backdrop-filter:blur(8px)}.row{display:flex;justify-content:space-between;align-items:center;gap:12px}.title{font-weight:800;font-size:16px}.muted{color:#64748b;font-size:12px}.nearest{font-size:14px;margin-top:7px}.status{font-size:12px;color:#475569;margin-top:5px}.hydrant-dot{width:22px;height:22px;border-radius:50%;background:#dc2626;border:3px solid #fff;box-shadow:0 1px 7px #0008}.user-dot{width:18px;height:18px;border-radius:50%;background:#2563eb;border:3px solid #fff;box-shadow:0 1px 8px #0008}.leaflet-control-zoom{margin-top:70px!important}.popup b{font-size:15px}.popup button{margin-top:8px;border:0;border-radius:9px;padding:8px 10px;background:#111827;color:#fff}.count{font-variant-numeric:tabular-nums}
+</style>
+</head>
+<body>
+<div id="map"></div>
+<div class="top"><div class="brand">🚒 Hydrant GPS</div><input id="search" class="search" placeholder="Search address or hydrant ID" /></div>
+<button class="fab" id="locate" title="My location">◎</button>
+<div class="panel"><div class="row"><div><div class="title">Nearby hydrants</div><div class="muted"><span id="count" class="count">Loading…</span> shown in this map area</div></div><div id="gps" class="muted">GPS: waiting</div></div><div id="nearest" class="nearest">Tap ◎ to get your location and find the nearest hydrant.</div><div id="status" class="status">Data source: NYC DEP Citywide Hydrants</div></div>
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin=""></script>
+<script>
+const API='https://data.cityofnewyork.us/resource/6pui-xhxz.json';
+const map=L.map('map',{zoomControl:true,preferCanvas:true}).setView([40.5795,-74.1502],12);
+L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{maxZoom:20,attribution:'© OpenStreetMap contributors'}).addTo(map);
+let layer=L.layerGroup().addTo(map), userMarker=null, userPos=null, loading=false, debounce;
+const $=id=>document.getElementById(id);
+function esc(s){return String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
+function dist(a,b,c,d){const R=3958.7613,p=Math.PI/180;const x=(c-a)*p,y=(d-b)*p;const h=Math.sin(y/2)**2+Math.cos(a*p)*Math.cos(c*p)*Math.sin(x/2)**2;return 2*R*Math.asin(Math.sqrt(h));}
+function bearing(a,b,c,d){const p=Math.PI/180,y=Math.sin((d-b)*p)*Math.cos(c*p),x=Math.cos(a*p)*Math.sin(c*p)-Math.sin(a*p)*Math.cos(c*p)*Math.cos((d-b)*p);return (Math.atan2(y,x)*180/Math.PI+360)%360;}
+function direction(deg){return ['N','NE','E','SE','S','SW','W','NW'][Math.round(deg/45)%8]}
+async function loadHydrants(){if(loading)return;loading=true;$('status').textContent='Loading hydrants…';const b=map.getBounds(), south=b.getSouth(), north=b.getNorth(), west=b.getWest(), east=b.getEast();const where=`latitude between ${south} and ${north} AND longitude between ${west} and ${east}`;const url=API+'?$select=unitid,boro,cb,latitude,longitude&$where='+encodeURIComponent(where)+'&$limit=5000';try{const r=await fetch(url);if(!r.ok)throw new Error(r.status);const data=await r.json();layer.clearLayers();data.forEach(h=>{const lat=+h.latitude,lon=+h.longitude;if(!isFinite(lat)||!isFinite(lon))return;const icon=L.divIcon({className:'',html:'<div class="hydrant-dot"></div>',iconSize:[22,22],iconAnchor:[11,11]});const m=L.marker([lat,lon],{icon});m.bindPopup(`<div class="popup"><b>🚒 Hydrant ${esc(h.unitid)}</b><br>Borough: ${esc(h.boro)} · Community District: ${esc(h.cb)}<br><small>${lat.toFixed(6)}, ${lon.toFixed(6)}</small><br><button onclick="navigateTo(${lat},${lon})">Navigate here</button></div>`);m.addTo(layer)});$('count').textContent=data.length+(data.length===5000?'+':'');$('status').textContent='NYC DEP hydrant data • Updated Dec. 18, 2025';findNearest(data)}catch(e){$('status').textContent='Could not load hydrants. Check your connection.';console.error(e)}finally{loading=false}}
+function findNearest(data){if(!userPos||!data?.length)return;let best=null,bd=Infinity;data.forEach(h=>{const d=dist(userPos.lat,userPos.lon,+h.latitude,+h.longitude);if(d<bd){bd=d;best=h}});if(best)$('nearest').innerHTML=`Nearest shown: <b>${esc(best.unitid)}</b> • ${bd<.1?(bd*5280).toFixed(0)+' ft':bd.toFixed(2)+' mi'} ${direction(bearing(userPos.lat,userPos.lon,+best.latitude,+best.longitude))}`}
+let watchId=null, lastGpsError=null;
+function gpsErrorMessage(err){
+  if(!err) return 'GPS unavailable';
+  if(err.code===1) return 'Location permission denied — allow Chrome location access';
+  if(err.code===2) return 'Location unavailable — turn on Android Location';
+  if(err.code===3) return 'GPS timed out — tap ◎ to retry';
+  return 'GPS error — tap ◎ to retry';
+}
+function applyPosition(p){
+  const c=p.coords;
+  userPos={lat:c.latitude,lon:c.longitude,accuracy:c.accuracy||null};
+  if(userMarker) map.removeLayer(userMarker);
+  userMarker=L.marker([userPos.lat,userPos.lon],{icon:L.divIcon({className:'',html:'<div class="user-dot"></div>',iconSize:[18,18],iconAnchor:[9,9]})}).addTo(map);
+  userMarker.bindPopup('Your location<br>Accuracy: '+(userPos.accuracy?Math.round(userPos.accuracy)+' m':'unknown'));
+  map.setView([userPos.lat,userPos.lon],16);
+  $('gps').textContent='GPS: on • '+(userPos.accuracy?Math.round(userPos.accuracy)+'m':'location found');
+  $('status').textContent='Location updated • loading nearby hydrants…';
+  loadHydrants();
+}
+function startGps(){
+  if(!navigator.geolocation){$('gps').textContent='GPS unavailable in this browser';return;}
+  $('gps').textContent='GPS: requesting…';
+  if(watchId!==null){navigator.geolocation.clearWatch(watchId);watchId=null;}
+  const opts={enableHighAccuracy:true,maximumAge:30000,timeout:30000};
+  let gotFix=false;
+  watchId=navigator.geolocation.watchPosition(p=>{gotFix=true;applyPosition(p);},err=>{
+    lastGpsError=err;
+    $('gps').textContent=gpsErrorMessage(err);
+    if(err.code===1){$('status').textContent='Chrome does not have permission to use your location.';return;}
+    // Retry once with network-assisted/low-accuracy location, which is often faster on phones.
+    navigator.geolocation.getCurrentPosition(p=>{gotFix=true;applyPosition(p);},e=>{
+      if(!gotFix){$('gps').textContent=gpsErrorMessage(e);$('status').textContent='Tap ◎ to retry GPS. Make sure Android Location is ON.';}
+    },{enableHighAccuracy:false,maximumAge:120000,timeout:60000});
+  },opts);
+  setTimeout(()=>{if(!gotFix && $('gps').textContent==='GPS: requesting…') $('gps').textContent='GPS: still searching…';},8000);
+}
+function locate(){startGps()}
+window.navigateTo=(lat,lon)=>{window.open(`https://www.google.com/maps/dir/?api=1&destination=${lat},${lon}`,'_blank')};
+$('locate').onclick=locate;
+map.on('moveend',()=>{clearTimeout(debounce);debounce=setTimeout(loadHydrants,350)});
+$('search').addEventListener('keydown',e=>{if(e.key==='Enter'){const q=e.target.value.trim();if(!q)return;fetch('https://nominatim.openstreetmap.org/search?format=jsonv2&limit=1&q='+encodeURIComponent(q)).then(r=>r.json()).then(x=>{if(x[0])map.setView([+x[0].lat,+x[0].lon],17);else alert('Location not found.')}).catch(()=>alert('Search failed.'))}});
+loadHydrants();
+// Start GPS automatically when the page is opened.
+setTimeout(startGps,250);
+</script>
+</body>
+</html>
